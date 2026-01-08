@@ -15,9 +15,9 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
+    
 DATASETS = {
-    'floodvn': {'id': '1GM77HHYx45XnabUsk9g-f150rScGXoC8', 'dir': 'floodvn'},
+    'floodvn': {'id': '1tQYUVtSdYJ3cGn1oftmb9MeWrmu4ez7P', 'dir': 'floodvn'},
     'floodkaggle': {'id': '1hue0azsiVoCrFRQ7FIn6xpKViw5ZEKlO', 'dir': 'floodkaggle'},
     'floodnet': {'id': '1IbbI5iomI7elrvERrGlgGB0V32KgOdIj', 'dir': '.'}
 }
@@ -44,7 +44,6 @@ def download_dataset(name):
 def main():
     parser = argparse.ArgumentParser(description='Flood Detection Training Benchmark')
     
-    parser.add_argument('--mode', type=str, required=True, choices=['classification', 'segmentation'])
     parser.add_argument('--dataset', type=str, default='floodvn', 
                         choices=['floodvn', 'floodkaggle', 'floodnet'])
     parser.add_argument('--model', type=str, required=True)
@@ -66,12 +65,11 @@ def main():
     num_classes = 1 if args.dataset in ['floodvn', 'floodkaggle'] else 10
     
     if args.size is None:
-        args.size = 512 if args.mode == 'segmentation' else 320
+        args.size = 512
     
     print("="*70)
     print("TRAINING CONFIGURATION")
     print("="*70)
-    print(f"Mode:          {args.mode}")
     print(f"Dataset:       {args.dataset}")
     print(f"Model:         {args.model}")
     print(f"Size:          {args.size}")
@@ -84,20 +82,19 @@ def main():
     print(f"Output Path:   {args.output_path}")
     print("="*70)
     
-    if args.mode == 'segmentation':
-        from segmentation.utils.trainer import train_segmentation
-        train_segmentation(
-            model_name=args.model,
-            loss_name=args.loss,
-            size=args.size,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            lr=args.lr,
-            dataset=args.dataset,
-            output_path=args.output_path,
-            seed=args.seed,
-            num_classes=num_classes
-        )
+    from segmentation.utils.trainer import train_segmentation
+    train_segmentation(
+        model_name=args.model,
+        loss_name=args.loss,
+        size=args.size,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        dataset=args.dataset,
+        output_path=args.output_path,
+        seed=args.seed,
+        num_classes=num_classes
+    )
 
 if __name__ == '__main__':
     main()

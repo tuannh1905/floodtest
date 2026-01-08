@@ -18,10 +18,9 @@ def set_seed(seed):
     
 DATASETS = {
     'floodvn': {'id': '1tQYUVtSdYJ3cGn1oftmb9MeWrmu4ez7P', 'dir': 'floodvn'},
-    'floodkaggle': {'id': '1hue0azsiVoCrFRQ7FIn6xpKViw5ZEKlO', 'dir': 'floodkaggle'},
+    'floodkaggle': {'id': '1tg3N5DW27LWgJ9cTvNeIUz5xoBqSrmEs', 'dir': 'floodkaggle'},
     'floodnet': {'id': '1IbbI5iomI7elrvERrGlgGB0V32KgOdIj', 'dir': '.'}
 }
-
 def download_dataset(name):
     folder = name if name != 'floodnet' else 'floodnet'
     if os.path.exists(folder):
@@ -50,7 +49,7 @@ def main():
     parser.add_argument('--size', type=int, default=None)
     parser.add_argument('--loss', type=str, default='bce')
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output_path', type=str, default='outputs')
@@ -65,7 +64,7 @@ def main():
     num_classes = 1 if args.dataset in ['floodvn', 'floodkaggle'] else 10
     
     if args.size is None:
-        args.size = 512
+        args.size = 256
     
     print("="*70)
     print("TRAINING CONFIGURATION")
@@ -82,7 +81,7 @@ def main():
     print(f"Output Path:   {args.output_path}")
     print("="*70)
     
-    from segmentation.utils.trainer import train_segmentation
+    from utils.trainer import train_segmentation
     train_segmentation(
         model_name=args.model,
         loss_name=args.loss,

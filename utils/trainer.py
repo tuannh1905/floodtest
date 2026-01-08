@@ -2,10 +2,10 @@ import os
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from segmentation.models import get_model
-from segmentation.losses import get_loss
-from segmentation.utils.dataloader import get_dataloaders
-from segmentation.utils.metrics import calculate_miou
+from models import get_model
+from losses import get_loss
+from utils.dataloader import get_dataloaders
+from utils.metrics import calculate_miou
 
 def count_parameters(model):
     total = sum(p.numel() for p in model.parameters())

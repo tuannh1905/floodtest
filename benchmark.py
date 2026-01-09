@@ -8,13 +8,6 @@ import gdown
 import shutil
 import zipfile
 import json
-
-import os
-import sys
-import torch
-import random
-import numpy as np
-import argparse
 import warnings
 
 def set_seed(seed):
@@ -57,27 +50,55 @@ def set_seed(seed):
 DATASETS = {
     'floodvn': {'id': '1tQYUVtSdYJ3cGn1oftmb9MeWrmu4ez7P', 'dir': 'floodvn'},
     'floodkaggle': {'id': '1tg3N5DW27LWgJ9cTvNeIUz5xoBqSrmEs', 'dir': 'floodkaggle'},
-    'floodnet': {'id': '1IbbI5iomI7elrvERrGlgGB0V32KgOdIj', 'dir': '.'}
+    'floodnet': {
+        'path': '/content/drive/MyDrive/FloodNet_Segmentation.zip',
+        'dir': 'floodnet'
+    }
 }
 
 def download_dataset(name):
-    folder = name if name != 'floodnet' else 'floodnet'
-    if os.path.exists(folder):
-        print(f"{name.capitalize()} exists. Skipping.")
-        return
+    """Download and extract dataset"""
     
-    cfg = DATASETS[name]
-    url = f'https://drive.google.com/uc?id={cfg["id"]}'
-    output = f'{name}.zip'
-    
-    print(f"Downloading {name.capitalize()}...")
-    gdown.download(url, output, quiet=False)
-    
-    with zipfile.ZipFile(output, 'r') as zip_ref:
-        zip_ref.extractall(cfg['dir'])
-    
-    os.remove(output)
-    print(f"{name.capitalize()} ready.")
+    if name == 'floodnet':
+        # FloodNet: extract from Google Drive path
+        zip_path = DATASETS['floodnet']['path']
+        extract_dir = DATASETS['floodnet']['dir']
+        
+        if os.path.exists(extract_dir):
+            print(f"FloodNet exists at {extract_dir}. Skipping.")
+            return
+        
+        if not os.path.exists(zip_path):
+            raise FileNotFoundError(
+                f"FloodNet zip not found at {zip_path}\n"
+                f"Please ensure the file exists in Google Drive."
+            )
+        
+        print(f"Extracting FloodNet from {zip_path}...")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_dir)
+        
+        print(f"✓ FloodNet extracted to {extract_dir}")
+        
+    else:
+        # FloodVN / FloodKaggle: download from Google Drive
+        folder = name
+        if os.path.exists(folder):
+            print(f"{name.capitalize()} exists. Skipping.")
+            return
+        
+        cfg = DATASETS[name]
+        url = f'https://drive.google.com/uc?id={cfg["id"]}'
+        output = f'{name}.zip'
+        
+        print(f"Downloading {name.capitalize()}...")
+        gdown.download(url, output, quiet=False)
+        
+        with zipfile.ZipFile(output, 'r') as zip_ref:
+            zip_ref.extractall(cfg['dir'])
+        
+        os.remove(output)
+        print(f"✓ {name.capitalize()} ready.")
 
 
 def verify_reproducibility(args, num_runs=2):
@@ -101,7 +122,7 @@ def verify_reproducibility(args, num_runs=2):
             dataset=args.dataset,
             output_path=os.path.join(args.output_path, f'repro_run{run}'),
             seed=args.seed,
-            num_classes=1 if args.dataset in ['floodvn', 'floodkaggle'] else 10
+            num_classes=10 if args.dataset == 'floodnet' else 1
         )
         results.append(result)
     
@@ -154,7 +175,7 @@ def run_multiseed_experiments(args, seeds):
             dataset=args.dataset,
             output_path=os.path.join(args.output_path, f'seed_{seed}'),
             seed=seed,
-            num_classes=1 if args.dataset in ['floodvn', 'floodkaggle'] else 10
+            num_classes=10 if args.dataset == 'floodnet' else 1
         )
         results.append({
             'seed': seed,
@@ -229,12 +250,13 @@ def main():
     if args.download:
         download_dataset(args.dataset)
     
-    num_classes = 1 if args.dataset in ['floodvn', 'floodkaggle'] else 10
+    # Determine number of classes based on dataset
+    num_classes = 10 if args.dataset == 'floodnet' else 1
     
     if args.size is None:
         args.size = 256
     
-    # NEW: Check for special modes
+    # Check for special modes
     if args.verify_repro:
         verify_reproducibility(args, num_runs=2)
         return

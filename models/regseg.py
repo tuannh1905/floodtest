@@ -2,190 +2,186 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class ConvBnAct(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, dilation=1, groups=1,
-                 bias=False, apply_act=True):
-        super(ConvBnAct, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias)
-        self.bn = nn.BatchNorm2d(out_channels)
-        if apply_act:
-            self.act = nn.ReLU(inplace=True)
-        else:
-            self.act = None
+
+def conv1x1(in_channels, out_channels, stride=1, bias=False):
+    return nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, 
+                    padding=0, bias=bias)
+
+
+class ConvBNAct(nn.Sequential):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, dilation=1, groups=1,
+                    bias=False, act_type='relu', **kwargs):
+        if isinstance(kernel_size, list) or isinstance(kernel_size, tuple):
+            padding = ((kernel_size[0] - 1) // 2 * dilation, (kernel_size[1] - 1) // 2 * dilation)
+        elif isinstance(kernel_size, int):    
+            padding = (kernel_size - 1) // 2 * dilation
+
+        super().__init__(
+            nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias),
+            nn.BatchNorm2d(out_channels),
+            Activation(act_type, **kwargs)
+        )
+
+
+class Activation(nn.Module):
+    def __init__(self, act_type, **kwargs):
+        super().__init__()
+        activation_hub = {'relu': nn.ReLU, 'relu6': nn.ReLU6,
+                          'leakyrelu': nn.LeakyReLU, 'prelu': nn.PReLU,
+                          'celu': nn.CELU, 'elu': nn.ELU, 
+                          'hardswish': nn.Hardswish, 'hardtanh': nn.Hardtanh,
+                          'gelu': nn.GELU, 'glu': nn.GLU, 
+                          'selu': nn.SELU, 'silu': nn.SiLU,
+                          'sigmoid': nn.Sigmoid, 'softmax': nn.Softmax, 
+                          'tanh': nn.Tanh, 'none': nn.Identity,
+                        }
+
+        act_type = act_type.lower()
+        if act_type not in activation_hub.keys():
+            raise NotImplementedError(f'Unsupport activation type: {act_type}')
+
+        self.activation = activation_hub[act_type](**kwargs)
 
     def forward(self, x):
-        x = self.conv(x)
-        x = self.bn(x)
-        if self.act is not None:
-            x = self.act(x)
+        return self.activation(x)
+
+
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction_ratio, act_type):
+        super().__init__()
+        squeeze_channels = int(channels * reduction_ratio)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.se_block = nn.Sequential(
+                            nn.Linear(channels, squeeze_channels),
+                            Activation(act_type),
+                            nn.Linear(squeeze_channels, channels),
+                            Activation('sigmoid')
+                        )
+
+    def forward(self, x):
+        residual = x
+        x = self.pool(x).squeeze(-1).squeeze(-1)
+        x = self.se_block(x).unsqueeze(-1).unsqueeze(-1)
+        x = x * residual
         return x
 
-class SEModule(nn.Module):
-    def __init__(self, w_in, w_se):
-        super().__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.conv1 = nn.Conv2d(w_in, w_se, 1, bias=True)
-        self.act1 = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(w_se, w_in, 1, bias=True)
-        self.act2 = nn.Sigmoid()
-
-    def forward(self, x):
-        y = self.avg_pool(x)
-        y = self.act1(self.conv1(y))
-        y = self.act2(self.conv2(y))
-        return x * y
-
-class Shortcut(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1, avg_downsample=False):
-        super(Shortcut, self).__init__()
-        if avg_downsample and stride != 1:
-            self.avg = nn.AvgPool2d(2, 2, ceil_mode=True)
-            self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-            self.bn = nn.BatchNorm2d(out_channels)
-        else:
-            self.avg = None
-            self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False)
-            self.bn = nn.BatchNorm2d(out_channels)
-
-    def forward(self, x):
-        if self.avg is not None:
-            x = self.avg(x)
-        x = self.conv(x)
-        x = self.bn(x)
-        return x
-
-class DilatedConv(nn.Module):
-    def __init__(self, w, dilations, group_width, stride, bias):
-        super().__init__()
-        num_splits = len(dilations)
-        assert(w % num_splits == 0)
-        temp = w // num_splits
-        assert(temp % group_width == 0)
-        groups = temp // group_width
-        convs = []
-        for d in dilations:
-            convs.append(nn.Conv2d(temp, temp, 3, padding=d, dilation=d, stride=stride, bias=bias, groups=groups))
-        self.convs = nn.ModuleList(convs)
-        self.num_splits = num_splits
-
-    def forward(self, x):
-        x = torch.tensor_split(x, self.num_splits, dim=1)
-        res = []
-        for i in range(self.num_splits):
-            res.append(self.convs[i](x[i]))
-        return torch.cat(res, dim=1)
 
 class DBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, dilations, group_width, stride, attention="se"):
+    def __init__(self, in_channels, out_channels, stride=1, r1=None, r2=None, 
+                    g=16, se_ratio=0.25, act_type='relu'):
         super().__init__()
-        avg_downsample = True
-        groups = out_channels // group_width
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.act1 = nn.ReLU(inplace=True)
-        if len(dilations) == 1:
-            dilation = dilations[0]
-            self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=stride, groups=groups, 
-                                   padding=dilation, dilation=dilation, bias=False)
+        assert stride in [1, 2], f'Unsupported stride: {stride}'
+        self.stride = stride
+
+        self.conv1 = ConvBNAct(in_channels, out_channels, 1, act_type=act_type)
+        if stride == 1:
+            assert in_channels == out_channels, 'In_channels should be the same as out_channels when stride = 1'
+            split_ch = out_channels // 2
+            assert split_ch % g == 0, 'Group width `g` should be evenly divided by split_ch'
+            groups = split_ch // g
+            self.split_channels = split_ch
+            self.conv_left = ConvBNAct(split_ch, split_ch, 3, dilation=r1, groups=groups, act_type=act_type)
+            self.conv_right = ConvBNAct(split_ch, split_ch, 3, dilation=r2, groups=groups, act_type=act_type)
         else:
-            self.conv2 = DilatedConv(out_channels, dilations, group_width=group_width, stride=stride, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        self.act2 = nn.ReLU(inplace=True)
-        self.conv3 = nn.Conv2d(out_channels, out_channels, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(out_channels)
-        self.act3 = nn.ReLU(inplace=True)
-        if attention == "se":
-            self.se = SEModule(out_channels, in_channels // 4)
-        elif attention == "se2":
-            self.se = SEModule(out_channels, out_channels // 4)
-        else:
-            self.se = None
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = Shortcut(in_channels, out_channels, stride, avg_downsample)
-        else:
-            self.shortcut = None
+            assert out_channels % g == 0, 'Group width `g` should be evenly divided by out_channels'
+            groups = out_channels // g
+            self.conv_left = ConvBNAct(out_channels, out_channels, 3, 2, groups=groups, act_type=act_type)
+            self.conv_skip = nn.Sequential(
+                                nn.AvgPool2d(2, 2, 0),
+                                ConvBNAct(in_channels, out_channels, 1, act_type='none')
+                            )
+        self.conv2 = nn.Sequential(
+                        SEBlock(out_channels, se_ratio, act_type),
+                        ConvBNAct(out_channels, out_channels, 1, act_type='none')
+                    )
+        self.act = Activation(act_type)
 
     def forward(self, x):
-        shortcut = self.shortcut(x) if self.shortcut else x
+        residual = x
         x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.act1(x)
+        if self.stride == 1:
+            x_left = self.conv_left(x[:, :self.split_channels])
+            x_right = self.conv_right(x[:,self.split_channels:])
+            x = torch.cat([x_left, x_right], dim=1)
+        else:
+            x = self.conv_left(x)
+            residual = self.conv_skip(residual)
+
         x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.act2(x)
-        if self.se is not None:
-            x = self.se(x)
-        x = self.conv3(x)
-        x = self.bn3(x)
-        x = self.act3(x + shortcut)
-        return x
+        x += residual
+        return self.act(x)
 
-class RegSegBody(nn.Module):
-    def __init__(self, ds):
+
+class Decoder(nn.Module):
+    def __init__(self, num_class, d4_channel, d8_channel, d16_channel, act_type):
         super().__init__()
-        gw = 16
-        attention = "se"
-        self.stage4 = DBlock(32, 48, [1], gw, 2, attention)
-        self.stage8 = nn.Sequential(
-            DBlock(48, 128, [1], gw, 2, attention),
-            DBlock(128, 128, [1], gw, 1, attention),
-            DBlock(128, 128, [1], gw, 1, attention)
-        )
-        blocks = []
-        blocks.append(DBlock(128, 256, [1], gw, 2, attention))
-        for d in ds[:-1]:
-            blocks.append(DBlock(256, 256, d, gw, 1, attention))
-        blocks.append(DBlock(256, 320, ds[-1], gw, 1, attention))
-        self.stage16 = nn.Sequential(*blocks)
+        self.conv_d16 = ConvBNAct(d16_channel, 128, 1, act_type=act_type)
+        self.conv_d8_stage1 = ConvBNAct(d8_channel, 128, 1, act_type=act_type)
+        self.conv_d4_stage1 = ConvBNAct(d4_channel, 8, 1, act_type=act_type)
+        self.conv_d8_stage2 = ConvBNAct(128, 64, 3, act_type=act_type)
+        self.conv_d4_stage2 = nn.Sequential(
+                                    ConvBNAct(64+8, 64, 3, act_type=act_type),
+                                    conv1x1(64, num_class)
+                                )
 
-    def forward(self, x):
-        x4 = self.stage4(x)
-        x8 = self.stage8(x4)
-        x16 = self.stage16(x8)
-        return {"4": x4, "8": x8, "16": x16}
+    def forward(self, x_d4, x_d8, x_d16):
+        size_d4 = x_d4.size()[2:]
+        size_d8 = x_d8.size()[2:]
 
-    def channels(self):
-        return {"4": 48, "8": 128, "16": 320}
+        x_d16 = self.conv_d16(x_d16)
+        x_d16 = F.interpolate(x_d16, size_d8, mode='bilinear', align_corners=True)
 
-class Exp2_Decoder26(nn.Module):
-    def __init__(self, num_classes, channels):
-        super().__init__()
-        channels4, channels8, channels16 = channels["4"], channels["8"], channels["16"]
-        self.head16 = ConvBnAct(channels16, 128, 1)
-        self.head8 = ConvBnAct(channels8, 128, 1)
-        self.head4 = ConvBnAct(channels4, 8, 1)
-        self.conv8 = ConvBnAct(128, 64, 3, 1, 1)
-        self.conv4 = ConvBnAct(64 + 8, 64, 3, 1, 1)
-        self.classifier = nn.Conv2d(64, num_classes, 1)
+        x_d8 = self.conv_d8_stage1(x_d8)
+        x_d8 += x_d16
+        x_d8 = self.conv_d8_stage2(x_d8)
+        x_d8 = F.interpolate(x_d8, size_d4, mode='bilinear', align_corners=True)
 
-    def forward(self, x):
-        x4, x8, x16 = x["4"], x["8"], x["16"]
-        x16 = self.head16(x16)
-        x8 = self.head8(x8)
-        x4 = self.head4(x4)
-        x16 = F.interpolate(x16, size=x8.shape[-2:], mode='bilinear', align_corners=False)
-        x8 = x8 + x16
-        x8 = self.conv8(x8)
-        x8 = F.interpolate(x8, size=x4.shape[-2:], mode='bilinear', align_corners=False)
-        x4 = torch.cat((x8, x4), dim=1)
-        x4 = self.conv4(x4)
-        x4 = self.classifier(x4)
-        return x4
+        x_d4 = self.conv_d4_stage1(x_d4)
+        x_d4 = torch.cat([x_d4, x_d8], dim=1)
+        x_d4 = self.conv_d4_stage2(x_d4)
+        return x_d4
+
 
 class RegSegModel(nn.Module):
-    def __init__(self, num_classes=1):
-        super().__init__()
-        self.stem = ConvBnAct(3, 32, 3, 2, 1)
-        self.body = RegSegBody([[1], [1, 2]] + 4 * [[1, 4]] + 7 * [[1, 14]])
-        self.decoder = Exp2_Decoder26(num_classes, self.body.channels())
+    def __init__(self, in_channels=3, num_classes=1, dilations=None, act_type='relu'):
+        super(RegSegModel, self).__init__()
+        if dilations is None:
+            dilations = [[1,1], [1,2], [1,2], [1,3], [2,3], [2,7], [2,3],
+                         [2,6], [2,5], [2,9], [2,11], [4,7], [5,14]]
+        else:
+            if len(dilations) != 13:
+                raise ValueError("Dilation pairs' length should be 13\n")
+
+        self.num_classes = num_classes
+        self.conv_init = ConvBNAct(in_channels, 32, 3, 2, act_type=act_type)
+
+        self.stage_d4 = DBlock(32, 48, 2, act_type=act_type)
+
+        layers = [DBlock(48, 128, 2, act_type=act_type)]
+        for _ in range(3-1):
+            layers.append(DBlock(128, 128, 1, r1=1, r2=1, act_type=act_type))
+        self.stage_d8 = nn.Sequential(*layers)
+
+        layers = [DBlock(128, 256, 2, act_type=act_type)]
+        for i in range(13-1):
+            layers.append(DBlock(256, 256, 1, r1=dilations[i][0], r2=dilations[i][1], act_type=act_type))
+
+        layers.append(DBlock(256, 320, 2, r1=dilations[-1][0], r2=dilations[-1][1], act_type=act_type))
+        self.stage_d16 = nn.Sequential(*layers)
+
+        self.decoder = Decoder(num_classes, 48, 128, 320, act_type)
 
     def forward(self, x):
-        input_shape = x.shape[-2:]
-        x = self.stem(x)
-        x = self.body(x)
-        x = self.decoder(x)
-        x = F.interpolate(x, size=input_shape, mode='bilinear', align_corners=False)
+        size = x.size()[2:]
+
+        x = self.conv_init(x)
+        x_d4 = self.stage_d4(x)
+        x_d8 = self.stage_d8(x_d4)
+        x_d16 = self.stage_d16(x_d8)
+        x = self.decoder(x_d4, x_d8, x_d16)
+        x = F.interpolate(x, size, mode='bilinear', align_corners=True)
         return x
 
+
 def build_model(num_classes=1):
-    return RegSegModel(num_classes=num_classes)
+    return RegSegModel(in_channels=3, num_classes=num_classes)

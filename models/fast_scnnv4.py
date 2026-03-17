@@ -5,26 +5,26 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # =========================================================================
-# 0. GHOST MODULE (TỐI ƯU HÓA POINTWISE CONV)
+# 0. GHOST MODULE (TỐI ƯU HÓA POINTWISE CONV VỚI PRELU)
 # =========================================================================
-# [ĐÃ SỬA]: Thêm class GhostModule để tạo feature map "ảo ảnh" với chi phí thấp
 class GhostModule(nn.Module):
-    def __init__(self, inp, oup, kernel_size=1, ratio=2, dw_size=3, stride=1, relu=True):
+    def __init__(self, inp, oup, kernel_size=1, ratio=2, dw_size=3, stride=1, use_act=True):
         super(GhostModule, self).__init__()
         self.oup = oup
         init_channels = math.ceil(oup / ratio)
         new_channels = init_channels * (ratio - 1)
 
+        # [ĐÃ SỬA]: Thay ReLU bằng PReLU
         self.primary_conv = nn.Sequential(
             nn.Conv2d(inp, init_channels, kernel_size, stride, kernel_size//2, bias=False),
             nn.BatchNorm2d(init_channels),
-            nn.ReLU(inplace=True) if relu else nn.Identity(),
+            nn.PReLU(init_channels) if use_act else nn.Identity(),
         )
 
         self.cheap_operation = nn.Sequential(
             nn.Conv2d(init_channels, new_channels, dw_size, 1, dw_size//2, groups=init_channels, bias=False),
             nn.BatchNorm2d(new_channels),
-            nn.ReLU(inplace=True) if relu else nn.Identity(),
+            nn.PReLU(new_channels) if use_act else nn.Identity(),
         )
 
     def forward(self, x):
@@ -35,20 +35,19 @@ class GhostModule(nn.Module):
 
 
 # =========================================================================
-# 1. STRIP POOLING MODULE (THAY THẾ PYRAMID POOLING)
+# 1. STRIP POOLING MODULE (ĐÃ LOẠI BỎ HOÀN TOÀN AVG POOLING TRUYỀN THỐNG)
 # =========================================================================
 class StripPooling(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(StripPooling, self).__init__()
-        self.pool1 = nn.AdaptiveAvgPool2d((1, None))  # Dải ngang
-        self.pool2 = nn.AdaptiveAvgPool2d((None, 1))  # Dải dọc
+        # AdaptiveAvgPool2d (1, None) ở đây là bắt buộc để tạo dải Strip, không phải AvgPool cồng kềnh
+        self.pool1 = nn.AdaptiveAvgPool2d((1, None))  
+        self.pool2 = nn.AdaptiveAvgPool2d((None, 1))  
         
         self.conv1 = nn.Conv2d(in_channels, out_channels, 1, bias=False)
         self.conv2 = nn.Conv2d(in_channels, out_channels, 1, bias=False)
         
-        # [ĐÃ SỬA]: Sử dụng GhostModule thay cho lớp nn.Conv2d 1x1 tiêu chuẩn
-        # Đây chính là chốt chặn cuối cùng của Global Feature Extractor
-        self.out_conv = GhostModule(in_channels + out_channels, out_channels, relu=True)
+        self.out_conv = GhostModule(in_channels + out_channels, out_channels, use_act=True)
 
     def forward(self, x):
         _, _, h, w = x.size()
@@ -58,22 +57,21 @@ class StripPooling(nn.Module):
         x2 = self.pool2(x)
         x2 = F.interpolate(self.conv2(x2), (h, w), mode='bilinear', align_corners=True)
         
-        # Cộng dải ngang + dọc, sau đó concat với input gốc
         sp_feat = torch.sigmoid(x1 + x2) * x
         out = self.out_conv(torch.cat([x, sp_feat], dim=1))
         return out
 
 
 # =========================================================================
-# 2. CÁC LỚP CƠ BẢN (GIỮ NGUYÊN TỪ BẢN GỐC)
+# 2. CÁC LỚP CƠ BẢN (NÂNG CẤP LÊN PRELU)
 # =========================================================================
-class _ConvBNReLU(nn.Module):
+class _ConvBNPReLU(nn.Module): # [ĐÃ SỬA]: Đổi tên và thay ReLU -> PReLU
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, **kwargs):
-        super(_ConvBNReLU, self).__init__()
+        super(_ConvBNPReLU, self).__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(True)
+            nn.PReLU(out_channels)
         )
     def forward(self, x): return self.conv(x)
 
@@ -84,10 +82,10 @@ class _DSConv(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv2d(dw_channels, dw_channels, 3, stride, 1, groups=dw_channels, bias=False),
             nn.BatchNorm2d(dw_channels),
-            nn.ReLU(True),
+            nn.PReLU(dw_channels), # [ĐÃ SỬA]
             nn.Conv2d(dw_channels, out_channels, 1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(True)
+            nn.PReLU(out_channels) # [ĐÃ SỬA]
         )
     def forward(self, x): return self.conv(x)
 
@@ -98,7 +96,7 @@ class _DWConv(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv2d(dw_channels, out_channels, 3, stride, 1, groups=dw_channels, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(True)
+            nn.PReLU(out_channels) # [ĐÃ SỬA]
         )
     def forward(self, x): return self.conv(x)
 
@@ -108,7 +106,7 @@ class LinearBottleneck(nn.Module):
         super(LinearBottleneck, self).__init__()
         self.use_shortcut = stride == 1 and in_channels == out_channels
         self.block = nn.Sequential(
-            _ConvBNReLU(in_channels, in_channels * t, 1),
+            _ConvBNPReLU(in_channels, in_channels * t, 1),
             _DWConv(in_channels * t, in_channels * t, stride),
             nn.Conv2d(in_channels * t, out_channels, 1, bias=False),
             nn.BatchNorm2d(out_channels)
@@ -126,7 +124,7 @@ class LinearBottleneck(nn.Module):
 class LearningToDownsample(nn.Module):
     def __init__(self, dw_channels1=32, dw_channels2=48, out_channels=64, **kwargs):
         super(LearningToDownsample, self).__init__()
-        self.conv = _ConvBNReLU(3, dw_channels1, 3, 2, 1) 
+        self.conv = _ConvBNPReLU(3, dw_channels1, 3, 2, 1) 
         self.dsconv1 = _DSConv(dw_channels1, dw_channels2, 2)
         self.dsconv2 = _DSConv(dw_channels2, out_channels, 2)
 
@@ -167,24 +165,20 @@ class FeatureFusionModule(nn.Module):
         super(FeatureFusionModule, self).__init__()
         self.scale_factor = scale_factor
         self.dwconv = _DWConv(lower_in_channels, out_channels, 1)
-        self.conv_lower_res = nn.Sequential(
-            nn.Conv2d(out_channels, out_channels, 1),
-            nn.BatchNorm2d(out_channels)
-        )
-        self.conv_higher_res = nn.Sequential(
-            nn.Conv2d(highter_in_channels, out_channels, 1),
-            nn.BatchNorm2d(out_channels)
-        )
-        self.relu = nn.ReLU(True)
+        self.conv_lower_res = GhostModule(out_channels, out_channels, use_act=False)
+        self.conv_higher_res = GhostModule(highter_in_channels, out_channels, use_act=False)
+        
+        # [ĐÃ SỬA]: Thay đổi ở layer hợp nhất cuối cùng
+        self.prelu = nn.PReLU(out_channels)
 
     def forward(self, higher_res_feature, lower_res_feature):
-        lower_res_feature = F.interpolate(lower_res_feature, scale_factor=self.scale_factor, mode='bilinear', align_corners=True)
+        lower_res_feature = F.interpolate(lower_res_feature, scale_factor=self.scale_factor, mode='bilinear', align_corners=False)
         lower_res_feature = self.dwconv(lower_res_feature)
         lower_res_feature = self.conv_lower_res(lower_res_feature)
 
         higher_res_feature = self.conv_higher_res(higher_res_feature)
         out = higher_res_feature + lower_res_feature
-        return self.relu(out)
+        return self.prelu(out)
 
 
 class Classifer(nn.Module):
@@ -204,14 +198,15 @@ class Classifer(nn.Module):
 
 
 # =========================================================================
-# 4. MAIN NETWORK (CẤU HÌNH THEO CHIẾN LƯỢC WIDTH MULTIPLIER)
+# 4. MAIN NETWORK
 # =========================================================================
 class FastSCNN_Slim(nn.Module):
     def __init__(self, num_classes=1, **kwargs):
         super(FastSCNN_Slim, self).__init__()
         
+        # Giữ nguyên cấu hình Width Multiplier
         alpha_lds = 0.5
-        alpha_gfe = 0.35
+        alpha_gfe = 1.0 
         
         lds_ch = [int(ch * alpha_lds) for ch in [32, 48, 64]]
         gfe_block_ch = [int(ch * alpha_gfe) for ch in [64, 96, 128]]
@@ -246,7 +241,6 @@ class FastSCNN_Slim(nn.Module):
         x_gfe = self.global_feature_extractor(higher_res_features)
         x_ffm = self.feature_fusion(higher_res_features, x_gfe)
         out = self.classifier(x_ffm)
-        
         return F.interpolate(out, size, mode='bilinear', align_corners=True)
 
 

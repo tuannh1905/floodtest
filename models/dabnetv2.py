@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-# =========================================================================
+
 # ATTENTION MODULE (CHIẾN LƯỢC 1)
-# =========================================================================
+
 class ECA_Module(nn.Module):
     """
     Efficient Channel Attention (ECA)
@@ -30,9 +30,9 @@ class ECA_Module(nn.Module):
         return x * y.expand_as(x)
 
 
-# =========================================================================
-# CÁC LỚP BỔ TRỢ (CƠ BẢN & DSCONV - CHIẾN LƯỢC 2)
-# =========================================================================
+
+# CÁC LỚP BỔ TRỢ
+
 class BNPReLU(nn.Module):
     def __init__(self, nIn):
         super().__init__()
@@ -77,10 +77,8 @@ class DSConv(nn.Module):
         x = self.pointwise(x)
         return x
 
-
-# =========================================================================
 # MODULE CỐT LÕI CỦA DABNET (NÂNG CẤP)
-# =========================================================================
+
 class DABModule(nn.Module):
     """
     Depth-wise Asymmetric Bottleneck Module (Đã tích hợp ECA)
@@ -169,9 +167,8 @@ class InputInjection(nn.Module):
         return input
 
 
-# =========================================================================
 # MẠNG CHÍNH (DABNET NÂNG CẤP)
-# =========================================================================
+
 class LightDABNet(nn.Module):
     def __init__(self, classes=1, block_1=3, block_2=6, ch_b1=64, ch_b2=96):
         """
@@ -207,8 +204,7 @@ class LightDABNet(nn.Module):
             self.DAB_Block_2.add_module("DAB_Module_2_" + str(i), DABModule(ch_b2, d=dilation_block_2[i]))
         self.bn_prelu_3 = BNPReLU((ch_b2 * 2) + 3)
 
-        # =========================================================
-        # Classifier (Chiến lược 3: Bóp cổ chai)
+        # Thêm Bottleneck Classifier
         # =========================================================
         # Kênh hiện tại: out2 (ch_b2) + out2_0 (ch_b2) + down_3 (3)
         concat_channels = (ch_b2 * 2) + 3 

@@ -15,3 +15,4 @@ pytorch-lightning
 fvcore
 tensorflow
 timm
+matplotlib

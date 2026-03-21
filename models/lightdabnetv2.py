@@ -53,7 +53,6 @@ class Conv(nn.Module):
         return output
 
 class DSConv(nn.Module):
-    """Depthwise Separable Convolution: Tiết kiệm ~8 lần tham số so với Conv chuẩn"""
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
         super().__init__()
         self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size,
@@ -74,7 +73,7 @@ class DABModule(nn.Module):
         self.bn_relu_1 = BNPReLU(nIn)
         
         # Đã DSConv-hóa để ép tham số xuống < 0.3M
-        self.conv3x3 = nn.Sequential(
+        self.dsconv3x3 = nn.Sequential(
             DSConv(nIn, nIn // 2, kernel_size=kSize, stride=1, padding=1),
             BNPReLU(nIn // 2)
         )
@@ -91,7 +90,7 @@ class DABModule(nn.Module):
 
     def forward(self, input):
         output = self.bn_relu_1(input)
-        output = self.conv3x3(output)
+        output = self.dsconv3x3(output)
 
         br1 = self.dconv1x3(self.dconv3x1(output))
         br2 = self.ddconv1x3(self.ddconv3x1(output))
@@ -132,30 +131,29 @@ class InputInjection(nn.Module):
         return input
 
 # =========================================================================
-# 4. BLOCK LITE-ASPP ATTENTION (Giá siêu rẻ: ~25k tham số)
+# 4. BLOCK LITE-ASPP ATTENTION (Kính thiên văn đa tầm nhìn)
 # =========================================================================
 class LiteASPPAttention(nn.Module):
     def __init__(self, ch_in, ch_pool=16, num_classes=1):
         super(LiteASPPAttention, self).__init__()
         
-        # 1. Các nhánh Pooling đa tầm nhìn (Parameter-free)
-        self.gap_pool = nn.AdaptiveAvgPool2d(1)
-        self.aspp_pool = nn.AdaptiveAvgPool2d(2)
+        # 1. Pooling Pyramid (Thu thập bối cảnh)
+        self.gap_pool = nn.AdaptiveAvgPool2d(1) # Tầm nhìn toàn cục (Cả khu vực ngập)
+        self.aspp_pool = nn.AdaptiveAvgPool2d(2) # Tầm nhìn rộng (Một con đường ngập)
         
-        # Conv ép kênh (Siêu nhẹ)
+        # Conv ép kênh cho 2 nhánh bối cảnh (Siêu nhẹ)
         self.gap_conv = Conv(ch_in, ch_pool, kSize=1, stride=1, padding=0, bn_acti=True)
         self.aspp_conv = Conv(ch_in, ch_pool, kSize=1, stride=1, padding=0, bn_acti=True)
         
-        # Nhánh gốc (Bảo toàn chi tiết rìa nước)
+        # Nhánh gốc (Bảo toàn chi tiết rìa nước, mép nhà)
         self.detail_conv = Conv(ch_in, ch_pool, kSize=1, stride=1, padding=0, bn_acti=True)
         
-        # 2. Classifier Head (Fusion)
-        # 3 nhánh * 16 channels = 48 channels
-        concat_channels = 3 * ch_pool 
+        # 2. Classifier Head
+        concat_channels = 3 * ch_pool # Fusion 3 nhánh: detail + gap + aspp (48 kênh)
         
         self.classifier = nn.Sequential(
-            nn.Conv2d(concat_channels, concat_channels, kernel_size=3, padding=1, groups=concat_channels, bias=False), # Depthwise
-            nn.Conv2d(concat_channels, 64, kernel_size=1, bias=False), # Pointwise
+            nn.Conv2d(concat_channels, concat_channels, kernel_size=3, padding=1, groups=concat_channels, bias=False), # DSConv
+            nn.Conv2d(concat_channels, 64, kernel_size=1, bias=False), 
             nn.BatchNorm2d(64),
             nn.Hardswish(inplace=True), 
             nn.Dropout2d(0.1),
@@ -165,12 +163,12 @@ class LiteASPPAttention(nn.Module):
     def forward(self, x):
         size = x.size()[2:] 
         
-        # Nhánh 1: Global Context (Trị lỗi quy mô lớn)
+        # Nhánh 1: Global Context
         out_gap = self.gap_pool(x)
         out_gap = self.gap_conv(out_gap)
         out_gap = F.interpolate(out_gap, size=size, mode='bilinear', align_corners=False)
         
-        # Nhánh 2: Spatial Context (Kết nối vệt nước)
+        # Nhánh 2: Spatial Context
         out_aspp = self.aspp_pool(x)
         out_aspp = self.aspp_conv(out_aspp)
         out_aspp = F.interpolate(out_aspp, size=size, mode='bilinear', align_corners=False)
@@ -178,10 +176,10 @@ class LiteASPPAttention(nn.Module):
         # Nhánh 3: Local Detail 
         out_detail = self.detail_conv(x)
         
-        # Fusion 48 kênh
+        # Nối đặc trưng
         feat_fusion = torch.cat([out_detail, out_gap, out_aspp], dim=1)
         
-        # Đưa ra kết quả cuối
+        # Xuất kết quả
         out = self.classifier(feat_fusion)
         return out
 
@@ -223,7 +221,7 @@ class LightDABNet(nn.Module):
             self.DAB_Block_2.add_module("DAB_Module_2_" + str(i), DABModule(ch_b2, d=dilation_block_2[i]))
         self.bn_prelu_3 = BNPReLU((ch_b2 * 2) + 3)
 
-        # Classifier Đa Tầm Nhìn (Lite-ASPP)
+        # ĐẦU LITE-ASPP ATTENTION (Thay thế cho Classifier cũ)
         concat_channels = (ch_b2 * 2) + 3 # 195 channels
         self.aspp_classifier = LiteASPPAttention(ch_in=concat_channels, ch_pool=16, num_classes=classes)
 
@@ -244,7 +242,7 @@ class LightDABNet(nn.Module):
         output2 = self.DAB_Block_2(output2_0)
         output2_cat = self.bn_prelu_3(torch.cat([output2, output2_0, down_3], 1))
 
-        # Phân loại
+        # Phân loại qua kính thiên văn đa tầm nhìn
         out = self.aspp_classifier(output2_cat)
         
         # Phóng to về kích thước gốc
@@ -257,9 +255,9 @@ class LightDABNet(nn.Module):
 # =========================================================================
 def build_model(num_classes=1):
     """
-    Khởi tạo mạng LightDABNet V7 siêu tối ưu toàn diện:
-    1. DSConv Cốt lõi + Init -> Ép tham số về ngưỡng ~130k-150k.
-    2. Hybrid Dilation [1, 2, 4, 8, 1, 2] -> Bảo toàn chi tiết đô thị.
-    3. LiteASPP Classifier (+25k) -> Cung cấp bối cảnh toàn cục.
+    Khởi tạo mạng LightDABNet V7 siêu tối ưu:
+    1. DSConv Cốt lõi + Init -> Ép tham số về ~130k-150k.
+    2. Hybrid Dilation [1, 2, 4, 8, 1, 2] -> Bảo toàn chi tiết.
+    3. LiteASPP Classifier -> Giải quyết lỗi tầm nhìn Multi-scale.
     """
     return LightDABNet(classes=num_classes, block_1=3, block_2=6, ch_b1=64, ch_b2=96)

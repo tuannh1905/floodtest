@@ -82,9 +82,6 @@ def train_segmentation(model_name, loss_name, size, epochs, batch_size, lr,
     set_seed(seed)
     
     from losses import get_loss
-    from losses.boundary_loss import JointEdgeSegLoss
-    base_criterion = get_loss(loss_name, num_classes=num_classes)
-
     criterion = get_loss(loss_name, num_classes=num_classes)
     
     optimizer = torch.optim.Adam(

@@ -143,11 +143,11 @@ class LiteASPPAttention(nn.Module):
         self.aspp_pool = nn.AdaptiveAvgPool2d(2)
         
         # Conv ép kênh (Siêu nhẹ)
-        self.gap_conv = Conv(ch_in, ch_pool, kernel_size=1, stride=1, padding=0, bn_acti=True)
-        self.aspp_conv = Conv(ch_in, ch_pool, kernel_size=1, stride=1, padding=0, bn_acti=True)
+        self.gap_conv = Conv(ch_in, ch_pool, kSize=1, stride=1, padding=0, bn_acti=True)
+        self.aspp_conv = Conv(ch_in, ch_pool, kSize=1, stride=1, padding=0, bn_acti=True)
         
         # Nhánh gốc (Bảo toàn chi tiết rìa nước)
-        self.detail_conv = Conv(ch_in, ch_pool, kernel_size=1, stride=1, padding=0, bn_acti=True)
+        self.detail_conv = Conv(ch_in, ch_pool, kSize=1, stride=1, padding=0, bn_acti=True)
         
         # 2. Classifier Head (Fusion)
         # 3 nhánh * 16 channels = 48 channels
